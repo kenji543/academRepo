@@ -56,6 +56,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'corsheaders',
+    'axes',  # Brute-force protection
+    'django_ratelimit',  # Rate limiting
 
     # Local apps
     'api',
@@ -69,6 +71,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'axes.middleware.AxesMiddleware',  # Must come after AuthenticationMiddleware
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -87,6 +90,66 @@ SIMPLE_JWT = {
 }
 
 AUTH_USER_MODEL = 'api.User'
+
+# ========== Authentication & Security ==========
+AUTHENTICATION_BACKENDS = [
+    'axes.backends.AxesStandaloneBackend',  # django-axes 5.0+ (brute-force protection)
+    'django.contrib.auth.backends.ModelBackend',
+]
+
+# ========== Caching Configuration ==========
+# Production: Use Redis (Railway, Render, Fly.io provide REDIS_URL)
+# Development: Falls back to LocMemCache (not production-safe)
+REDIS_URL = os.environ.get('REDIS_URL')
+
+if REDIS_URL:
+    # Production: Redis cache
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+            'OPTIONS': {
+                'CLIENT_CLASS': 'redis.StrictRedis',
+                'CONNECTION_POOL_KWARGS': {
+                    'socket_connect_timeout': 5,
+                    'socket_keepalive': True,
+                    'socket_keepalive_options': {
+                        1: 1,
+                        2: 3,
+                        3: 5,
+                    } if hasattr(__builtins__, 'TCP_KEEPIDLE') else {},
+                    'retry_on_timeout': True,
+                },
+            },
+            'KEY_PREFIX': 'academy',
+            'TIMEOUT': 300,
+        }
+    }
+else:
+    # Development/Fallback: Local memory cache
+    # WARNING: Not suitable for production or distributed environments
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'unique-snowflake',
+            'TIMEOUT': 300,
+        }
+    }
+
+# ========== Django-Axes Configuration (Brute-force Protection) ==========
+AXES_FAILURE_LIMIT = 5  # Lock after 5 failed attempts
+AXES_COOLOFF_DURATION = timedelta(minutes=15)  # Lock duration
+AXES_LOCK_OUT_AT_FAILURE = True
+AXES_USE_USER_AGENT = False  # Deprecated; removed in django-axes 5.0+
+AXES_LOCKOUT_TEMPLATE = None  # Use default
+
+# Use cache backend for storing failed attempts
+AXES_CACHE = 'default'
+
+# ========== Django-Ratelimit Configuration ==========
+# Uses the CACHES['default'] backend (Redis in production)
+RATELIMIT_USE_CACHE = 'default'
+RATELIMIT_ENABLE = True
 
 ROOT_URLCONF = 'backend.urls'
 
@@ -183,3 +246,11 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# ========== System Checks - Suppress when falling back to LocMemCache ==========
+# Only use this if Redis is truly unavailable AND you accept the production risks
+if not REDIS_URL:
+    SILENCED_SYSTEM_CHECKS = [
+        'django_ratelimit.E003',  # LocMemCache not shared
+        'django_ratelimit.W001',  # LocMemCache not officially supported
+    ]
